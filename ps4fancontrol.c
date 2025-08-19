@@ -37,68 +37,19 @@ struct icc_cmd {
 
 int getUserGroupId(int *uid, int *gid)
 {
-	size_t len = 0;
-	ssize_t read;
-	char *buf = NULL;
-	
-	*uid = -1;
-	*gid = -1;
+    struct passwd *pw;
 
-    FILE *f = fopen("/etc/passwd", "r");
-    if(f == NULL)
-    {
-		perror("Error");
-		exit(-1);
-	}
-	
-	while((read = getline(&buf, &len, f)) != -1) 
-	{
-		int foundHome = -1;
-		int foundBin = -1;
-		
-		for(int i = 0; i < read; i++)
-		{	
-			char *line = malloc(read);
-			line = buf;
-			
-			if(strncmp((line + i), ":/home", 6) == 0)
-			{
-				foundHome = 0;
-			}
-			if(strncmp((line + i), ":/bin/", 6) == 0)
-			{
-				foundBin = 0;
-			}
-			
-			if(foundBin == 0 && foundHome == 0)
-			{	
-				for(int n = 0; n < i; n++)
-				{
-					if(*uid == -1)
-					{
-						if(strncmp((line + n), ":x:", 3) == 0)
-						{
-							*uid = atoi((line + n + 3));
-							printf("uid: %d\n", *uid);
-							n += 3;
-						}
-					}
-					else
-					{
-						if(*(line + n) == ':')
-						{
-							*gid = atoi((line + n + 1));
-							printf("gid: %d\n", *gid);
-							fclose(f);
-							return 0;
-						}
-					}
-				}
-			}
-		}
+    pw = getpwuid(getuid());
+    if (pw == NULL) {
+        perror("getpwuid");
+        return -1;
     }
-    
-    return -1;
+
+    *uid = pw->pw_uid;
+    *gid = pw->pw_gid;
+
+    printf("uid: %d, gid: %d\n", *uid, *gid);
+    return 0;
 }
 
 int file_exist(const char *filename)
