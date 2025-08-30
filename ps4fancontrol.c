@@ -13,11 +13,13 @@
 #include <sys/sysmacros.h>
 #include "forms.h"
 
+#define SCALE 1
+
 FL_OBJECT *cnt, *bReset, *bSave, *bExit;
 uint8_t curTemp = 0x4f;
 uint8_t prevTemp = 0;
 
-char *configFile;
+const char *configFile = "/var/lib/ps4fancontrol/threshold_temp";
 
 int debug = -1;
 
@@ -35,71 +37,8 @@ struct icc_cmd {
 
 #define ICC_IOCTL_CMD _IOWR(ICC_MAJOR, 1, struct icc_cmd)
 
-int getUserGroupId(int *uid, int *gid)
-{
-	size_t len = 0;
-	ssize_t read;
-	char *buf = NULL;
-	
-	*uid = -1;
-	*gid = -1;
-
-    FILE *f = fopen("/etc/passwd", "r");
-    if(f == NULL)
-    {
-		perror("Error");
-		exit(-1);
-	}
-	
-	while((read = getline(&buf, &len, f)) != -1) 
-	{
-		int foundHome = -1;
-		int foundBin = -1;
-		
-		for(int i = 0; i < read; i++)
-		{	
-			char *line = malloc(read);
-			line = buf;
-			
-			if(strncmp((line + i), ":/home", 6) == 0)
-			{
-				foundHome = 0;
-			}
-			if(strncmp((line + i), ":/bin/", 6) == 0)
-			{
-				foundBin = 0;
-			}
-			
-			if(foundBin == 0 && foundHome == 0)
-			{	
-				for(int n = 0; n < i; n++)
-				{
-					if(*uid == -1)
-					{
-						if(strncmp((line + n), ":x:", 3) == 0)
-						{
-							*uid = atoi((line + n + 3));
-							printf("uid: %d\n", *uid);
-							n += 3;
-						}
-					}
-					else
-					{
-						if(*(line + n) == ':')
-						{
-							*gid = atoi((line + n + 1));
-							printf("gid: %d\n", *gid);
-							fclose(f);
-							return 0;
-						}
-					}
-				}
-			}
-		}
-    }
-    
-    return -1;
-}
+#define CONFIG_DIR "/var/lib/ps4fancontrol"
+#define CONFIG_FILE GLOBAL_CONFIG_FILE
 
 int file_exist(const char *filename)
 {	
@@ -111,62 +50,47 @@ int file_exist(const char *filename)
 	return 0;
 }
 
+int make_config_world_writable(const char *file)
+{
+    // 0666 = lectura/escritura para todos
+    if (chmod(file, 0666) != 0) {
+        perror("Failed to set permissions on config file");
+        return -1;
+    }
+    return 0;
+}
+
 int initSettings()
 {
-	char *configDir;
-	char *tmp_buffer;
-	const char *homeDir;
-	struct passwd *pwd;
-	
-	pwd = getpwuid(getuid());
-	homeDir = pwd->pw_dir;
-		
-	printf("Home directory is %s\n", homeDir);
-		
-	tmp_buffer = malloc(strlen(homeDir) + 10);
-	sprintf(tmp_buffer, "%s/.config", homeDir);
-	
-	printf("Config directory is %s\n", tmp_buffer);
-	
-	DIR *dir = opendir(tmp_buffer);
+	if (geteuid() == 0) { // si se ejecuta como root
+	    make_config_world_writable(configFile);
+	}
+
+	DIR *dir = opendir(CONFIG_DIR);
 	if(dir == NULL)
 	{
-		printf("Directory %s not found\n",tmp_buffer );
 		if(errno == ENOENT)
 		{
-			printf("Create directory %s\n", tmp_buffer);
-			if(mkdir(tmp_buffer, 0700))
+			printf("Directory %s not found, creating it...\n", CONFIG_DIR);
+			if(mkdir(CONFIG_DIR, 0755))
 			{
-				perror("Error");
+				perror("Error creating config directory");
+				printf("If you get a permission denied error, open as root/using sudo once and try again without root/sudo\n");
 				return -1;
 			}
 		}
-	}
-	closedir(dir);
-	
-	configDir = malloc(strlen(tmp_buffer) + 16);
-	sprintf(configDir, "%s/Ps4FanControl", tmp_buffer);
-	
-	dir = opendir(configDir);
-	if(dir == NULL)
-	{
-		printf("Directory %s not found\n", configDir);
-		if(errno == ENOENT)
+		else
 		{
-			printf("Create directory %s\n", configDir);
-			if(mkdir(configDir, 0755))
-			{
-				perror("Error");
-				return -1;
-			}
+			perror("Error opening config directory");
+			printf("If you get a permission denied error, open as root/using sudo once and try again without root/sudo\n");
+			return -1;
 		}
 	}
-	closedir(dir);
-	
-	configFile = malloc(strlen(configDir) + 16);
-	sprintf(configFile, "%s/threshold_temp", configDir);
-	free(configDir);
-	
+	else
+	{
+		closedir(dir);
+	}
+
 	return 0;
 }
 
@@ -175,7 +99,8 @@ int saveConfig(uint8_t temperature)
 	FILE *f = fopen(configFile, "wb");
 	if(f == NULL)
 	{
-		perror("Error");
+		perror("Error opening config file for writing");
+		printf("If you get a permission denied error, open as root/using sudo once and try again without root/sudo\n");
 		return -1;
 	}
 	if(fwrite(&temperature, 1, 1, f) != 1)
@@ -187,27 +112,22 @@ int saveConfig(uint8_t temperature)
 	}
 	
 	printf("Selected threshold temperature saved in %s\n", configFile);
-	
 	fclose(f);
-	
 	return 0;
 }
 
 int loadConfig()
 {
-	FILE *f;
-	uint8_t ret;
-	uint8_t temp_bak = curTemp;
-	
-	f = fopen(configFile, "rb");
+	FILE *f = fopen(configFile, "rb");
 	if(f == NULL)
 	{
 		printf("Configuration file not found\n");
 		return -1;
 	}
-	
-	fseek(f, 0, SEEK_CUR);
-	
+
+	uint8_t ret;
+	uint8_t temp_bak = curTemp;
+
 	if(fread(&ret, 1, 1, f) != 1)
 	{
 		printf("Error reading configuration file\n");
@@ -215,41 +135,40 @@ int loadConfig()
 		fclose(f);
 		return -1;
 	}
-	
-	printf("ret value: %d\n", ret);
-	
+
 	if(ret >= 45 && ret <= 85)
 		curTemp = ret;
 	else
-		printf("Configuration file contain a invalid value\n");
-	
+		printf("Configuration file contains an invalid value\n");
+
 	printf("Threshold temperature loaded from configuration file\n");
-	
 	fclose(f);
-	
+
 	return 0;
 }
 
 void showError(const char *title, const char *str)
 {
-	FL_FORM *f;
-	FL_OBJECT *obj;
-	
-	f = fl_bgn_form(FL_UP_BOX, 300, 130);
-	fl_add_box(FL_NO_BOX, 0, 0, 300, 90, str);
-	obj = fl_add_button(FL_NORMAL_BUTTON, 115, 90, 70, 25, "OK");
-	
-	fl_end_form();
-	
-	fl_show_form(f, FL_PLACE_MOUSE, FL_FULLBORDER, title);
-	
-	while(fl_do_forms() != obj)
-	
-	fl_finish();
-	exit(-1);
+    FL_FORM *f;
+    FL_OBJECT *obj;
+    FL_OBJECT *msg;	
+    
+    f = fl_bgn_form(FL_UP_BOX, 400*SCALE, 130*SCALE);
+    msg = fl_add_box(FL_NO_BOX, 0, 0, 400*SCALE, 90*SCALE, str);
+    obj = fl_add_button(FL_NORMAL_BUTTON, 165*SCALE, 90*SCALE, 70*SCALE, 25*SCALE, "OK");
+
+    fl_set_object_lsize(msg, 12*SCALE);  // tamaño de letra escalado
+    fl_set_object_lsize(obj, 10*SCALE);
+
+    fl_end_form();
+    fl_show_form(f, FL_PLACE_MOUSE, FL_FULLBORDER, title);
+
+    while(fl_do_forms() != obj);
+
+    fl_finish();
+    exit(-1);
 }
 	
-
 int set_temp_threshold(uint8_t temperature)
 {
 	int fd = -1;
@@ -506,29 +425,17 @@ int main(int argc, char *argv[])
 	if(fd == -1)
 	{
 		if(no_gui)
-			showError("Error", "You need run the program as root!");
+			showError("Error", "You need run the program as root/using sudo once!");
 		else
-			printf("Error: you need run the program as root!");
+			printf("Error: you need run the program as root/using sudo once!");
 			
 		return -1;
 	}
 	close(fd);
 	
-	//drop root priviliges
-	if(getUserGroupId(&uid, &gid))
-	{
-		printf("Uid and gid not found, can't drop privileges\n");
-		return -1;
-	}
-	
-	setgid(gid);
-	setuid(uid);
-	
-	if(setuid(0) == 0)
-	{
-		printf("Error: we still root, this is bad\n");
-		return -1;
-	}
+	uid = getuid();
+	gid = getgid();
+	printf("Running as uid=%d, gid=%d\n", uid, gid);
 	
 	get_temp_threshold(&curTemp);
 	
@@ -545,20 +452,25 @@ int main(int argc, char *argv[])
 	
 	//GUI
 	FL_FORM *form;
-
-    form = fl_bgn_form(FL_UP_BOX, 350, 150);
+	
+	form = fl_bgn_form(FL_UP_BOX, 350*SCALE, 150*SCALE);
     
-	cnt = fl_add_counter(FL_NORMAL_COUNTER, 25, 50, 300, 25, "Celsius Temperature");
+	cnt = fl_add_counter(FL_NORMAL_COUNTER, 25*SCALE, 50*SCALE, 300*SCALE, 25*SCALE, "Celsius Temperature");
 	fl_set_counter_bounds(cnt, 45, 85);
 	fl_set_counter_step(cnt, 1, 10);
 	fl_set_counter_precision(cnt, 0);
 	fl_set_object_callback(cnt, counter_callback, ret);
 	fl_set_counter_value(cnt, curTemp);
 	fl_set_object_return(cnt, FL_RETURN_END_CHANGED);
-	
-	bReset = fl_add_button(FL_NORMAL_BUTTON, 17, 115, 102, 25, "Reset");
-	bSave = fl_add_button(FL_BUTTON, 124, 115, 102, 25, "Save");
-	bExit = fl_add_button(FL_NORMAL_BUTTON, 231, 115, 102, 25, "Exit");
+
+	bReset = fl_add_button(FL_NORMAL_BUTTON, 17*SCALE, 115*SCALE, 102*SCALE, 25*SCALE, "Reset");
+	bSave  = fl_add_button(FL_BUTTON,        124*SCALE, 115*SCALE, 102*SCALE, 25*SCALE, "Save");
+	bExit  = fl_add_button(FL_NORMAL_BUTTON, 231*SCALE, 115*SCALE, 102*SCALE, 25*SCALE, "Exit");
+
+	fl_set_object_lsize(cnt, 10*SCALE);
+	fl_set_object_lsize(bSave, 10*SCALE);
+	fl_set_object_lsize(bReset, 10*SCALE);
+	fl_set_object_lsize(bExit, 10*SCALE);
 	
 	fl_set_object_callback(bSave, save_callback, ret);
 	if(ret != -1)
